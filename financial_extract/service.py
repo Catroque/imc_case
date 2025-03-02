@@ -66,7 +66,6 @@ def _get_job_config(ctx: Context, conn, job_name: str):
     (
         job_name    VARCHAR(64) PRIMARY KEY,
         tickers     VARCHAR(1000) NOT NULL,
-        period      INTEGER,
         interval    INTEGER,
         overlap     INTEGER,
         bucket_name VARCHAR(128) NOT NULL,
@@ -82,7 +81,6 @@ def _get_job_config(ctx: Context, conn, job_name: str):
                 SELECT 
                     job_name,
                     tickers,
-                    period,
                     interval,
                     overlap,
                     bucket_name,
@@ -506,8 +504,9 @@ def execute(ctx: Context, params: dict) -> tuple[str, Error | None]:
         return None, err
 
     return {
+        "status":       "success",
         "execution_id": ctx.execution.execution_id,
         "ingestion_id": ctx.execution.id,
-        "rows":         ctx.execution.records,
+        "records":      ctx.execution.records,
         "filename":     ctx.execution.filename
     }, None

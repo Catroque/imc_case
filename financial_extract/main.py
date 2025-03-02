@@ -20,7 +20,7 @@ from mocks   import SecretsMock, StorageMock, DatabaseMock
 from service import execute, settings
 
 
-def _entrypoint(ctx: Context, request: flask.Request) -> Error | None:
+def _entrypoint(ctx: Context, request: flask.Request) -> tuple[str, Error | None]:
     log.info(f"Process initializing...")
     
     body = request.get_json()
@@ -28,11 +28,11 @@ def _entrypoint(ctx: Context, request: flask.Request) -> Error | None:
     try:
         params, err = settings(ctx, body)
         if err is not None:
-            return err
+            return None, err
 
     except BaseException as ex:
         err = Error("Exception loading settings: {}".format(str(ex)), 500)
-        return err
+        return None, err
 
     try:
         execution_id = params["execution_id"]
@@ -42,19 +42,19 @@ def _entrypoint(ctx: Context, request: flask.Request) -> Error | None:
 
     except BaseException as ex:
         err = Error("Exception writing settings: {}".format(str(ex)), 500)
-        return err
+        return None, err
 
     try:
-        err = execute(ctx, params)
+        msg, err = execute(ctx, params)
         if err is not None:
-            return err
+            return None, err
 
     except BaseException as ex:
         err = Error("Exception processing request: {}".format(str(ex)), 500)
-        return err
+        return None, err
 
     log.info("Process completed successfully")
-    return None
+    return msg, None
 
 
 @functions_framework.http
@@ -66,17 +66,21 @@ def main(request: flask.Request) -> tuple[str, int]:
     ctx.storage_cli  = storage.Client()
     ctx.database_cli = psycopg2
 
-    message = "success"
+    message = None
     status  = 200
 
-    err = _entrypoint(ctx, request)
+    message, err = _entrypoint(ctx, request)
     if err is not None:
-        message = err.Message()
+        message = {
+            "status":       "error",
+            "execution_id": ctx.execution.execution_id,
+            "message":      err.Message(),
+        }
         status  = err.code
-
+    
     ctx.metrics_cli.registry("cloud_function")
 
-    return ctx.execution.execution_id, message, status
+    return message, status
 
 
 if __name__ == '__main__':

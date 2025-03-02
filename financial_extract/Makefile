@@ -19,4 +19,4 @@ clean:
 	rm -rf .venv
 
 zip:
-	zip -r ../financial_extract_v$(VERSION)_$(DATEREF).zip *.py Makefile README.md requirements.txt version
+	zip -r ../cf_financial_extract_v$(VERSION)_$(DATEREF).zip *.py Makefile README.md requirements.txt version
