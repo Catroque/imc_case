@@ -13,7 +13,7 @@ import yfinance as yf
 from schema    import Schema, And, Use
 from logger    import log
 from constants import SECRET_DATABASE_CREDENTIALS
-from constants import DEFAULT_DATA_INTERVAL, DEFAULT_DATA_OVERLAP, DEFAULT_TICKER_INTERVAL
+from constants import DEFAULT_DATA_INTERVAL, DEFAULT_DATA_OVERLAP
 from constants import EXECUTION_STATUS_RUNNING, EXECUTION_STATUS_SUCCESS, EXECUTION_STATUS_FAILED
 from constants import HEARTBEAT_SLEEPING, HEARTBEAT_INTERVAL
 from context   import Context
@@ -241,60 +241,39 @@ def _update_execution_status(ctx: Context, conn, status: str):
     #
 
 
-def _extract_stock_data(ctx: Context):
+def _transform_to_silver_layer(ctx: Context):
     """
-    Método de extração propriamente dito. Deve ser refatorado para 
-    que seja possível a generalização para outros datasets do mesmo 
-    modelo de ingestão
+    Método de transformação propriamente dito. Deve ser refatorado 
+    para que seja possível a generalização para outros datasets do 
+    mesmo modelo de ingestão
     """
     log.info(f"Beggining tickers extraction")
     log.info(f"Extraction params \
                 tickers:         {ctx.execution.tickers}, \
                 start_time:      {ctx.execution.start_time}, \
                 end_time:        {ctx.execution.end_time}, \
-                ticker_interval: {DEFAULT_TICKER_INTERVAL}, \
                 bucket:          {ctx.execution.bucket_name}")
     
-    # data de execução para nomear os arquivos
+    # as bibliotecas fsspec e gcsfs permitem leitura do dataframe 
+    # diretamente do GCS.
     #
-    execution_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+    try:
+        df = pd.read_parquet(ctx.execution.file_name)
+
+    except Exception as ex:
+        return None, Error(f"Error reading file {ctx.execution.file_name}: {str(ex)}")
     
-    # dataframe consolidado da extração
+    # normalização dos tipos
     #
-    stock_df_columns = ["Date", "Ticker", "Open", "Adj Close", "Close", "High", "Low", "Volume"]
-    stock_df = pd.DataFrame(columns=stock_df_columns)
+    try:
+        df["Date"] = pd.to_datetime(df["Date"])
+        df[["Open", "Adj Close", "Close", "High", "Low"]] = df[["Open", "Adj Close", "Close", "High", "Low"]].astype("float64")
+        df["Volume"] = df["Volume"].astype("int64")
 
-    # extrair dados para cada ticker
-    #
-    for ticker in ctx.execution.tickers:
-        try:
-            log.info(f"Extracting ticker {ticker}")
-            
-            aux_df = yf.download(ticker, 
-                                    start    = ctx.execution.start_time, 
-                                    end      = ctx.execution.end_time, 
-                                    interval = DEFAULT_TICKER_INTERVAL, 
-                                    progress = False)
+    except Exception as ex:
+        return None, Error(f"Error normalizing types: {str(ex)}")
 
-            if aux_df.empty:
-                # TODO: criar método para envio de mensagem de log
-                # para canal de contingência
-                #
-                log.warning(f"Empty dataframe for ticker '{ticker}'")
-                continue
-            
-            # resetar index para transformar a data em coluna
-            #
-            aux_df = aux_df.reset_index()
-            aux_df['Ticker'] = ticker
-            aux_df = aux_df[stock_df_columns]
-
-            stock_df = pd.concat([stock_df, aux_df], ignore_index=True)
-            
-        except Exception as ex:
-            return None, Error(f"Error extracting data ticker {ticker}: {str(ex)}")
-    
-    return stock_df, None
+    return df, None
 
 
 def _save_dataframe_on_gcs(ctx: Context, df: pd.DataFrame):
@@ -379,13 +358,14 @@ def _heartbeat(ctx: Context, conn, mutex: threading.Lock):
     log.info(f"Heartbeat for {ctx.execution.execution_id} finalized")
 
 
-def _ingestion(ctx: Context, params: dict) -> Error | None:
+def _transform(ctx: Context, params: dict) -> Error | None:
     try:
         mutex = threading.Lock()
 
         project_id   = params['project_id']
         job_name     = params['job_name']
         execution_id = params['execution_id']
+        filename     = params['filename']
         
         # estabelecer conexão com o banco
         #
@@ -426,6 +406,7 @@ def _ingestion(ctx: Context, params: dict) -> Error | None:
         ctx.execution.tickers      = job_config['tickers']
         ctx.execution.interval     = job_config['interval'] if 'interval' in job_config else DEFAULT_DATA_INTERVAL
         ctx.execution.overlap      = job_config['overlap']  if 'overlap'  in job_config else DEFAULT_DATA_OVERLAP
+        ctx.execution.file_name    = filename
         ctx.execution.bucket_name  = job_config['bucket_name']
         ctx.execution.start_time   = last_execution["end_time"] if last_execution else None
         ctx.execution.start_time  -= timedelta(seconds=ctx.execution.overlap) if ctx.execution.start_time else None
@@ -447,7 +428,7 @@ def _ingestion(ctx: Context, params: dict) -> Error | None:
 
         # executar a ingestão
         #
-        stock_df, err = _extract_stock_data(ctx)
+        stock_df, err = _transform_to_silver_layer(ctx)
         if err is not None:
             _update_execution_status(ctx, conn, EXECUTION_STATUS_FAILED)
             return err
@@ -494,6 +475,7 @@ def settings(ctx: Context, body: dict = None) -> tuple[dict, Error | None]:
         "project_id":   And(str, Use(str.lower)),
         "job_name":     And(str, Use(str.lower)),
         "execution_id": And(str, Use(str.lower)),
+        "filename":     And(str, Use(str.lower)),
     })
 
     if schema.is_valid(params) == False:
@@ -504,7 +486,7 @@ def settings(ctx: Context, body: dict = None) -> tuple[dict, Error | None]:
 
 def execute(ctx: Context, params: dict) -> tuple[str, Error | None]:
 
-    err = _ingestion(ctx, params)
+    err = _transform(ctx, params)
     if err is not None:
         return None, err
 

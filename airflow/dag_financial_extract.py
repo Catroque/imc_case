@@ -17,10 +17,14 @@ from airflow.operators.python_operator               import PythonOperator
 from airflow.providers.slack.operators.slack_webhook import SlackWebhookOperator
 from airflow.utils.dates                             import days_ago
 
-CREDENTIAL                   = "/home/airflow/gcs/data/gcp_conn.json"
-CLOUD_FUNCTION_CONNECTION_ID = "financial_extract_gcp_http_cf"
-CLOUD_FUNCTION_ENDPOINT      = "financial_extract"
-TASK_ID_EXTRACT              = "financial_extract"
+CREDENTIAL            = "/home/airflow/gcs/data/gcp_conn.json"
+CF_CONNECTION_ID      = "gcp_http_cf"
+CF_ENDPOINT_EXTRACT   = "financial_extract"
+CF_ENDPOINT_TRANSFORM = "financial_extract"
+TASK_ID_EXTRACT       = "financial_extract"
+TASK_ID_TRANSFORM     = "financial_transform"
+XCOM_EXTRACT          = "financial_extract_xcom"
+XCOM_TRANSFORM        = "financial_transform_xcom"
 
 LOGGER = logging.getLogger("airflow.task")
 
@@ -88,12 +92,12 @@ def financial_extract(ti, **kwargs):
 
     execution_id = str(uuid.uuid4())
 
-    print(f"==> Task {execution_id}: financial_extract - initialized")
+    print(f"==> Task extraction {execution_id}: initialized")
 
     # Autenticação
     #
-    connection_id = BaseHook.get_connection(CLOUD_FUNCTION_CONNECTION_ID)
-    audience = f"{connection_id.host}/{CLOUD_FUNCTION_ENDPOINT}"
+    connection_id = BaseHook.get_connection(CF_CONNECTION_ID)
+    audience = f"{connection_id.host}/{CF_ENDPOINT_EXTRACT}"
     request  = google.auth.transport.requests.Request()
     token    = google.oauth2.id_token.fetch_id_token(request, audience)
 
@@ -103,16 +107,18 @@ def financial_extract(ti, **kwargs):
     }
 
     params = {
+        "project_id":   kwargs["project_id"],
+        "job_name":     kwargs["job_name"],
         "execution_id": execution_id
     }
 
-    print(f"==> Task {execution_id}: params {params}")
+    print(f"==> Task extraction {execution_id}: params {params}")
 
     invoke_request = SimpleHttpOperator(
         task_id             = TASK_ID_EXTRACT,
         method              = 'POST',
-        http_conn_id        = CLOUD_FUNCTION_CONNECTION_ID,
-        endpoint            = CLOUD_FUNCTION_ENDPOINT,
+        http_conn_id        = CF_CONNECTION_ID,
+        endpoint            = CF_ENDPOINT_EXTRACT,
         headers             = headers,
         data                = json.dumps(params),
         on_failure_callback = on_failure_callback_fn,
@@ -120,14 +126,85 @@ def financial_extract(ti, **kwargs):
     )
     invoke_request.execute(dict())
 
-    print(f"==> Task {execution_id}: finalized")
+    response = ti.xcom_pull(task_ids=TASK_ID_EXTRACT)
+
+    try:
+        response_body = json.loads(response)
+    except:
+        response_body = {}
+
+    if response.status_code != 200:
+        raise ValueError(f"Exception executing extraction: {response_body}")
+    if "status" in response_body and response_body.status_code != 200:
+        raise ValueError(f"Error executing extraction: {response_body}")
+    
+    ti.xcom_push(key=XCOM_EXTRACT, value=response_body)
+    print(f"==> Task extraction {execution_id}: finalized")
+
+
+def financial_transform(ti, **kwargs):
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = CREDENTIAL
+
+    params = ti.xcom_pull(key=XCOM_EXTRACT, task_ids=TASK_ID_EXTRACT)
+    execution_id = params[0]['execution_id']
+    filename     = params[0]['filename']
+
+    print(f"==> Task transform {execution_id}: initialized")
+
+    # Autenticação
+    #
+    connection_id = BaseHook.get_connection(CF_CONNECTION_ID)
+    audience = f"{connection_id.host}/{CF_ENDPOINT_TRANSFORM}"
+    request  = google.auth.transport.requests.Request()
+    token    = google.oauth2.id_token.fetch_id_token(request, audience)
+
+    headers = {
+        "Authorization": f"bearer {token}", 
+        "Content-Type":  "application/json"
+    }
+
+    params = {
+        "project_id":   kwargs["project_id"],
+        "job_name":     kwargs["job_name"],
+        "execution_id": execution_id,
+        "filename":     filename,
+    }
+
+    print(f"==> Task transform {execution_id}: params {params}")
+
+    invoke_request = SimpleHttpOperator(
+        task_id             = TASK_ID_EXTRACT,
+        method              = 'POST',
+        http_conn_id        = CF_CONNECTION_ID,
+        endpoint            = CF_ENDPOINT_TRANSFORM,
+        headers             = headers,
+        data                = json.dumps(params),
+        on_failure_callback = on_failure_callback_fn,
+        response_check      = lambda response: response.status_code == 200,
+    )
+    invoke_request.execute(dict())
+
+    response = ti.xcom_pull(task_ids=TASK_ID_EXTRACT)
+
+    try:
+        response_body = json.loads(response)
+    except:
+        response_body = {}
+
+    if response.status_code != 200:
+        raise ValueError(f"Exception executing transform: {response_body}")
+    if "status" in response_body and response_body.status_code != 200:
+        raise ValueError(f"Error executing transform: {response_body}")
+    
+    ti.xcom_push(key=XCOM_TRANSFORM, value=response_body)
+    print(f"==> Task transform {execution_id}: finalized")
 
 
 # ------------------------------------------------------------------------------
 #   DAG
 #
 
-DAG_ID       = 'raw_financial_data'
+DAG_ID       = 'financial_data'
 SCHEDULE     = '5 */1 * * *'
 DEFAULT_ARGS = {
     'owner':            'airflow',
@@ -154,4 +231,10 @@ with DAG(
         provide_context = True,
     )
 
-    task_extract
+    task_transform = PythonOperator(
+        task_id         = TASK_ID_EXTRACT,
+        python_callable = financial_transform,
+        provide_context = True,
+    )
+
+    task_extract >> task_transform

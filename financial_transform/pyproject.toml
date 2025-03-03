@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "financial-transform"
+version = "0.1.0"
+description = ""
+authors = ["Rinaldo Catroque <catroque.bersi@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+functions-framework = "^3.8.2"
+psycopg2 = "^2.9.10"
+pandas = "^2.2.3"
+google-cloud-storage = "^3.1.0"
+google-cloud-secret-manager = "^2.23.1"
+schema = "^0.7.7"
+fsspec = "^2025.2.0"
+gcsfs = "^2025.2.0"
+flask = "^3.1.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

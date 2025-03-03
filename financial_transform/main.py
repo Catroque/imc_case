@@ -1,7 +1,5 @@
-import sys
-import uuid
-
-from unittest import mock
+import os
+import pandas as pd
 
 import flask
 import functions_framework
@@ -9,8 +7,6 @@ import psycopg2
 
 from google.cloud import storage
 from google.cloud import secretmanager
-
-import constants
 
 from logger  import log, filter
 from context import Context
@@ -89,7 +85,7 @@ if __name__ == '__main__':
     payload = {
         'project_id':   "9876543210",
         'job_name':     "financial_data",
-        'execution_id': str(uuid.uuid4())
+        'execution_id': "9d8c348f-41e2-4224-84ea-4da608b1eec5",
     }
 
     request = SimpleNamespace(
