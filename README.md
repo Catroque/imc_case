@@ -8,6 +8,10 @@ Diagrama C4 Model para System Contexto da arquitetura do case:
 
 A base da arquitetura de ingestão apresentada é utilizar o Airflow para gestão de execução de requisições para funções Cloud Functions como meio de propagação das transformações dos dados entre camadas.
 
+Diagrama de container:
+
+![alt](./pipeline_v1_c4_diagram_containers.png)
+
 ## Modelo de Datalake
 
 Conforme requisito do case será utilizado o modelo Medallion em 3 camadas. Na arquitetura as cloud functions serão responsáveis pelo processamento adequado a cada camada, como exposto aseguir:
@@ -67,6 +71,15 @@ Necessária as seguintes configurações de conexões no ambiente Airflow:
 - SLACK_WEBHOOK_CONN_ID - host e porta do hook de difusão das mensagens para o Slack
 - CLOUD_FUNCTION_CONNECTION_ID - host e porta do endereço de requisição das Cloud Functions no GCP
 
+### DAG e Tasks
+
+A DAG localizada em `./airflow/dag_financial_data.py` contém 3 (trÊs) tasks que realizadm a chamada sequencial dos serviços correspondentes à "extração", "transformação" e "agregação" no pipeline de ingestão.
+
+A primeira task, "financial_extract", cria um identificador UUID que deverá ser utilizado por todas tasks nas chamadas aos serviços Cloud Functions. Esse identificador permitira rastreabilidade do pipeline na base de dados de registros de execução (PostgreSQL) e quaisquer posteriores iniciativas de controle de idempotência.
+
+A passagem de parâmetros entre as tasks é realizada através de XCOM, com o JSON de retorno das chamadas. Um pequeno tratamento foi codificado para avaliar o retorno das requisições, mas cabe uma análise com maior rigor visando consolidar tratamento em exceptions.
+
+
 ## Cloud Functions
 
 Recomenda-se utilizar funções de segunda geração em função da disponibilidade de tempo ativo de uma execução em requisições HTTP (cerca de 1 hora na 2nd version comparada a 9 minutos com a 1rs version).
@@ -76,6 +89,41 @@ O deploy dos serviços como CLoud Functions serão realizadados a partir do arma
 ### Credenciais
 
 Recomenda-se criar um usuário próprio e uma regra (role) dedicada para consumo dos recursos, apenas com as permissões pontuais de acesso.
+
+### Heartbeat
+
+Em todos serviços elaborados há a presença de uma thread responsável pela atualização do status do job enquanto em processo de execução.  
+
+```python
+def _heartbeat(ctx: Context, conn, mutex: threading.Lock):
+    log.info(f"Heartbeat for {ctx.execution.execution_id} initiated")
+
+    tms = datetime.now()
+
+    while True:
+        # aguarda por um pequeno intervalo, para evitar 
+        # que a conclusão da execução seja afetada pelo
+        # tempo do heartbeat
+        #
+        time.sleep(HEARTBEAT_SLEEPING)
+
+        # verificar se já é hora de atualizar  o status 
+        # da execução
+        #
+        if tms + HEARTBEAT_INTERVAL < datetime.now():
+            try:
+                # tenho que ter exclusividade no controlador
+                # de contexto para garantir que ninguém esteja
+                # manipulando o status
+                #
+                mutex.acquire()
+
+                if ctx.execution.status == EXECUTION_STATUS_RUNNING:    <<<=====
+...
+```
+
+Trata-se de um controle de sincronização que atua na variável `status` do context de execução. O controle envolde as funções `_heaertbeat` e a função de atualização de status `_update_execution_status`. Dessa forma, temos recursos para no gerenciamento do pipeline criar mecanismo de identificação de registros `zombie` no controle de ingestão.
+
 
 ### Serviço de Extração ou Ingestão (BRONZE)
 
@@ -109,6 +157,17 @@ Esse serviço é desenvolvido na linguagem Python e disponibilizado no diretóri
 
 Para realizar o deploy, abordado no documento específico já citado, podemos utilizar os comandos disponíveis no arquivo `./gcloud/cf_financial_transform.cmd`, semelhantemente ao demonstrado anteriormente.
 
+#### Boundaries Ingestion
+
+Por questão de tempo não foi possivel codificar procedimento de limpeza de registros de borda de ingestão, porém, foi anotado no código a demanda. Issofaz-se necessario em decorrência dos *delays* na consolidação das bases de origem. Esses *delays* podem ocorre por diversos motivos e não há garantia que o último dado obtido da ingestão tenha a maior data dos registros que ainda estão por ser inseridos ou atualizados (filas, thread e isolation level). Portanto, é necessário voltar um pouco na estampa de tempo da execução utilizada na query anterior, visando obter esses dados possivelmente ausentes.
+
+Por causa desse procedimento a camada Silver tem que realizar o tratamento de duplicidades na consolidação de sua tabela. Removendo os itens duplicados do dataframe antes da criação do arquivo parquet. Temos ciência desse problema, mas infelizmente não foi possível sua implementação a contento.
+
+> Utilizar a camada Silver como tabela nativa do Big Query facilitaria o processo de boundaries cleaning, pois construir código SQL para esse tipo de problema é muito mais simples que codificar em outros paradigmas. Caberia avaliar se o  particionamento utilizado seria adequado ao uso estabelecido.
+> 
+> A camada Silver como dados tabulares, representam um espelho da tabela transacional. Os colaboradores de áreas que consomem as informações transacionais são os principais requerentes de acesso a estes datasets. Analisar suas demandas e estabalecer critérios de seleção impact adiretamente nos custas e, consequentemente, na definição de partição da tabela.
+>
+> Utilizar tabela externa possibilita a utilização de outros *engines* de bancos de dados (DuckDB, Cassandra, etc.) visando ter maior eficiencia na gestão ds recursos.
 
 ## Database Control
 
@@ -171,6 +230,8 @@ A camada Gold não conterá arquivos no Cloud Storage. Deverá ser um conjunto d
 
 ## Big Query
 
+### Camadas Bronze e Silver
+
 As tabelas para a camada Bronze e Silver serão do tipo externas, geradas a partir do arquivos no formato parquet localizadas nos bucket correspondentes.
 
 Para realizar a criação das tabelas podemos utilizar as queries disponíveis nos arquivos `./sql/bq_*.sql`
@@ -202,4 +263,29 @@ Nas camadas Bronze e Silver utilizaremos particionamento Hive, com a utilizaçã
 
 > Há possibilidade de utilizar a camada Silver como dados tabulares nativos, devendo nessa implementação fazer uso de partições e clusterização conforma a necessidade de cada dataset. Optamos pela estratégia mais simples e barata visando posterior refatoração em face de maior amplitudo de uso.
 
+### Camada Gold
+
+Utilizaremos uma tabela para a camda Gold que agrega os dados recebidos. O arquivo com o script está disponível em `./sql/bq_gold_financial_extract.sql`, também observado a seguir:
+
+```sql
+CREATE TABLE projetct_id.gold_layer.financial_data_hour
+(
+    ticker 		STRING  OPTIONS(description = 'Símbolo da ação'),
+    date 		TIMESTAMP OPTIONS(description = 'Data da cotação'),
+    volume 		INTEGER OPTIONS(description = 'Volume de negociações')
+    execution_id STRING OPTIONS(description = 'Identificador de execução do job de ingestão'),
+)
+PARTITIONS 
+(
+    DATE(date)
+)
+CLUSTER BY
+    ticker,
+    execution_id
+;
+```
+
+Visando diminuir o custo de operações de merge, consolidação temporal, adotamos particionamento pela data, e somente a data, da coluna "date" do ticker (lembrando que o BigQuery permite até 4000 partições por tabela). Aproveitamos para clusterizar a coluna "ticker" e, conjuntamente, a coluna "execution_id".
+
+Atualmente há a possibilidade de utilizar indexadores no BigQuery, mas por se tratar de um case simples, esse recurso não foi considerado aqui. Da mesma forma a utilização de procedures ou functions permite diminuir o acoplamento dos serviços ao modelo de dados.
 

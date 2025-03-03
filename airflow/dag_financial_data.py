@@ -18,11 +18,16 @@ from airflow.providers.slack.operators.slack_webhook import SlackWebhookOperator
 from airflow.utils.dates                             import days_ago
 
 CREDENTIAL            = "/home/airflow/gcs/data/gcp_conn.json"
+
 CF_CONNECTION_ID      = "gcp_http_cf"
 CF_ENDPOINT_EXTRACT   = "financial_extract"
-CF_ENDPOINT_TRANSFORM = "financial_extract"
+CF_ENDPOINT_TRANSFORM = "financial_transform"
+CF_ENDPOINT_AGGREGATE = "financial_aggregate"
+
 TASK_ID_EXTRACT       = "financial_extract"
 TASK_ID_TRANSFORM     = "financial_transform"
+TASK_ID_AGGREGATE     = "financial_aggregate"
+
 XCOM_EXTRACT          = "financial_extract_xcom"
 XCOM_TRANSFORM        = "financial_transform_xcom"
 
@@ -200,6 +205,64 @@ def financial_transform(ti, **kwargs):
     print(f"==> Task transform {execution_id}: finalized")
 
 
+def financial_aggregate(ti, **kwargs):
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = CREDENTIAL
+
+    params = ti.xcom_pull(key=XCOM_TRANSFORM, task_ids=TASK_ID_TRANSFORM)
+    execution_id = params[0]['execution_id']
+    filename     = params[0]['filename']
+
+    print(f"==> Task aggregate {execution_id}: initialized")
+
+    # Autenticação
+    #
+    connection_id = BaseHook.get_connection(CF_CONNECTION_ID)
+    audience = f"{connection_id.host}/{CF_ENDPOINT_AGGREGATE}"
+    request  = google.auth.transport.requests.Request()
+    token    = google.oauth2.id_token.fetch_id_token(request, audience)
+
+    headers = {
+        "Authorization": f"bearer {token}", 
+        "Content-Type":  "application/json"
+    }
+
+    params = {
+        "project_id":   kwargs["project_id"],
+        "job_name":     kwargs["job_name"],
+        "execution_id": execution_id,
+        "filename":     filename,
+    }
+
+    print(f"==> Task aggregate {execution_id}: params {params}")
+
+    invoke_request = SimpleHttpOperator(
+        task_id             = TASK_ID_AGGREGATE,
+        method              = 'POST',
+        http_conn_id        = CF_CONNECTION_ID,
+        endpoint            = CF_ENDPOINT_AGGREGATE,
+        headers             = headers,
+        data                = json.dumps(params),
+        on_failure_callback = on_failure_callback_fn,
+        response_check      = lambda response: response.status_code == 200,
+    )
+    invoke_request.execute(dict())
+
+    response = ti.xcom_pull(task_ids=TASK_ID_AGGREGATE)
+
+    try:
+        response_body = json.loads(response)
+    except:
+        response_body = {}
+
+    if response.status_code != 200:
+        raise ValueError(f"Exception executing aggregate: {response_body}")
+    if "status" in response_body and response_body.status_code != 200:
+        raise ValueError(f"Error executing aggregate: {response_body}")
+    
+    ti.xcom_push(key=XCOM_TRANSFORM, value=response_body)
+    print(f"==> Task aggregate {execution_id}: finalized")
+
+
 # ------------------------------------------------------------------------------
 #   DAG
 #
@@ -234,6 +297,12 @@ with DAG(
     task_transform = PythonOperator(
         task_id         = TASK_ID_EXTRACT,
         python_callable = financial_transform,
+        provide_context = True,
+    )
+
+    task_aggregate = PythonOperator(
+        task_id         = TASK_ID_AGGREGATE,
+        python_callable = financial_aggregate,
         provide_context = True,
     )
 

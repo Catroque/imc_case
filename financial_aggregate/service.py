@@ -3,12 +3,10 @@ import json
 import sys
 import threading
 import time
-import uuid
 
 from datetime import datetime, timedelta
 
 import pandas as pd
-import yfinance as yf
 
 from schema    import Schema, And, Use
 from logger    import log
@@ -241,66 +239,66 @@ def _update_execution_status(ctx: Context, conn, status: str):
     #
 
 
-def _transform_to_silver_layer(ctx: Context):
+def _aggregate_to_gold_layer(ctx: Context):
     """
-    Método de transformação propriamente dito. Deve ser refatorado 
+    Método de aggregação para camada GOLD. Deve ser refatorado 
     para que seja possível a generalização para outros datasets do 
     mesmo modelo de ingestão
     """
-    log.info(f"Beggining tickers extraction")
-    log.info(f"Extraction params \
+    log.info(f"Beggining tickers aggregation")
+    log.info(f"Aggregaton params \
                 tickers:         {ctx.execution.tickers}, \
                 start_time:      {ctx.execution.start_time}, \
                 end_time:        {ctx.execution.end_time}, \
                 bucket:          {ctx.execution.bucket_name}")
     
+    query = """
+        --
+        -- O correto seria avaliar os dados agregados anteriores
+        -- ao batch de execução, mas há pouco tempo para construção
+        -- de um recurso mais sofisticado, aqui temos um propósito
+        -- para demonstração.
+        --
+        --
+        -- Agrega os registros por data e hora 
+        --
+        CREATE OR REPLACE TABLE `aux_layer.temp_agg_tickers` AS
+        SELECT
+            fd.ticker,
+            FORMAT_TIMESTAMP("%Y-%m-%d %H:00:00", fd.date) dt_hour,
+            SUM(volume) volume_total
+        FROM
+            silver_layer.financial_data fd
+        WHERE
+            fd.execution_id = '{ctx.execution.execution_id}'
+        GROUP BY 
+            fd.ticker,
+            FORMAT_TIMESTAMP("%Y-%m-%d %H:00:00", fd.date)
+        ;    
+
+        -- Insere os registros na camada gold
+        --
+        INSERT INTO gold_layer.financial_data_hour
+        SELECT
+            fd.ticker,
+            fd.dt_hour,
+            fd.volume_total as volume,
+            fd.execution_id
+        FROM
+            aux_layer.temp_agg_tickers fd
+    """
+
     # as bibliotecas fsspec e gcsfs permitem leitura do dataframe 
     # diretamente do GCS.
     #
     try:
-        df = pd.read_parquet(ctx.execution.file_name)
+        job = ctx.analytics_cli.query(query, location="us-east4")
+        results = job.result()
 
     except Exception as ex:
-        return None, Error(f"Error reading file {ctx.execution.file_name}: {str(ex)}")
+        return Error(f"Error reading file {ctx.execution.file_name}: {str(ex)}")
     
-    # Uma abordagem necessária aqui é a identificação da borda dos 
-    # dados presentes no arquivo, com a finalidade de identificar na
-    # base de dados consolidada da camada Silver duplicidade de dados.
-    #
-
-    # normalização dos tipos
-    #
-    try:
-        df["Date"] = pd.to_datetime(df["Date"])
-        df[["Open", "Adj Close", "Close", "High", "Low"]] = df[["Open", "Adj Close", "Close", "High", "Low"]].astype("float64")
-        df["Volume"] = df["Volume"].astype("int64")
-
-    except Exception as ex:
-        return None, Error(f"Error normalizing types: {str(ex)}")
-
-    return df, None
-
-
-def _save_dataframe_on_gcs(ctx: Context, df: pd.DataFrame):
-
-    # as bibliotecas fsspec e gcsfs permitem salvar o dataframe 
-    # diretamente no GCS
-    #
-    bucket_name = ctx.execution.bucket_name
-    index_name  = ctx.execution.execution_id
-    file_name   = f"raw_{ctx.execution.execution_id}"
-
-    # utilizando hive partitioning
-    #
-    filepath = f"gs://{bucket_name}/id={index_name}/{file_name}.parquet"
-
-    try:
-        df.to_parquet(filepath, index=False)
-    
-    except Exception as ex:
-        return None, Error(f"Error saving extraction on storage {filepath}: {str(ex)}", 500)
-    
-    return filepath, None
+    return None
 
 
 def _heartbeat(ctx: Context, conn, mutex: threading.Lock):
@@ -363,7 +361,7 @@ def _heartbeat(ctx: Context, conn, mutex: threading.Lock):
     log.info(f"Heartbeat for {ctx.execution.execution_id} finalized")
 
 
-def _transform(ctx: Context, params: dict) -> Error | None:
+def _aggregate(ctx: Context, params: dict) -> Error | None:
     try:
         mutex = threading.Lock()
 
@@ -433,23 +431,10 @@ def _transform(ctx: Context, params: dict) -> Error | None:
 
         # executar a ingestão
         #
-        stock_df, err = _transform_to_silver_layer(ctx)
+        err = _aggregate_to_gold_layer(ctx)
         if err is not None:
             _update_execution_status(ctx, conn, EXECUTION_STATUS_FAILED)
             return err
-
-        ctx.execution.records = len(stock_df)
-        log.debug(f"Extraction for execution {ctx.execution.id} completed with {ctx.execution.records} records")
-
-        # salvar dataframe no storage
-        #
-        filepath, err = _save_dataframe_on_gcs(ctx, stock_df)
-        if err is not None:
-            _update_execution_status(ctx, conn, EXECUTION_STATUS_FAILED)
-            return err
-
-        ctx.execution.filename = filepath
-        log.debug(f"Dataframe saved on storage {ctx.execution.filename}")
 
         # atualizar o status da execução em sucesso
         #
@@ -491,7 +476,7 @@ def settings(ctx: Context, body: dict = None) -> tuple[dict, Error | None]:
 
 def execute(ctx: Context, params: dict) -> tuple[str, Error | None]:
 
-    err = _transform(ctx, params)
+    err = _aggregate(ctx, params)
     if err is not None:
         return None, err
 
