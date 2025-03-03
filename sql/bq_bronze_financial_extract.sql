@@ -1,4 +1,4 @@
-CREATE EXTERNAL TABLE projetct_id.bronze_layer.financial_extact
+CREATE EXTERNAL TABLE projetct_id.bronze_layer.financial_data
 (
     date 		TIMESTAMP OPTIONS(description = 'Data da cotação'),
     ticker 		STRING  OPTIONS(description = 'Símbolo da ação'),

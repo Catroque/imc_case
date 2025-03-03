@@ -239,7 +239,7 @@ Para realizar a criação das tabelas podemos utilizar as queries disponíveis n
 Como exemplo, abaixo os script para criação da camada bronze:
 
 ```sql
-CREATE EXTERNAL TABLE projetct_id.bronze_layer.financial_extact
+CREATE EXTERNAL TABLE projetct_id.bronze_layer.financial_extact
 (
     date 		TIMESTAMP OPTIONS(description = 'Data da cotação'),
     ticker 		STRING  OPTIONS(description = 'Símbolo da ação'),
@@ -288,4 +288,3 @@ CLUSTER BY
 Visando diminuir o custo de operações de merge, consolidação temporal, adotamos particionamento pela data, e somente a data, da coluna "date" do ticker (lembrando que o BigQuery permite até 4000 partições por tabela). Aproveitamos para clusterizar a coluna "ticker" e, conjuntamente, a coluna "execution_id".
 
 Atualmente há a possibilidade de utilizar indexadores no BigQuery, mas por se tratar de um case simples, esse recurso não foi considerado aqui. Da mesma forma a utilização de procedures ou functions permite diminuir o acoplamento dos serviços ao modelo de dados.
-

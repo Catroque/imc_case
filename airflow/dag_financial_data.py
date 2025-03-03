@@ -189,7 +189,7 @@ def financial_transform(ti, **kwargs):
     )
     invoke_request.execute(dict())
 
-    response = ti.xcom_pull(task_ids=TASK_ID_EXTRACT)
+    response = ti.xcom_pull(task_ids=TASK_ID_TRANSFORM)
 
     try:
         response_body = json.loads(response)
@@ -295,7 +295,7 @@ with DAG(
     )
 
     task_transform = PythonOperator(
-        task_id         = TASK_ID_EXTRACT,
+        task_id         = TASK_ID_TRANSFORM,
         python_callable = financial_transform,
         provide_context = True,
     )
