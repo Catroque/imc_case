@@ -124,6 +124,13 @@ def _heartbeat(ctx: Context, conn, mutex: threading.Lock):
 
 Trata-se de um controle de sincronização que atua na variável `status` do context de execução. O controle envolde as funções `_heaertbeat` e a função de atualização de status `_update_execution_status`. Dessa forma, temos recursos para no gerenciamento do pipeline criar mecanismo de identificação de registros `zombie` no controle de ingestão.
 
+### Boilerplate
+
+Os códigos apresentados na elaboração dos serviços tem porções semelhantes quando não iguais. A construção de uma biblioteca para reutlização dos controles envolvidos seria a próxima etapa na melhoria do código. A estrutura dos arquivos já está preparada para tal construção, bastando apenas realizar a segregação da função principal como recurso especializado.
+
+Também é importante enfatizar que, por se tratar de uma avaliação, o conjunto de generalização proposto focou a ingestão de recursos REST API. Esse tipo de ingestão tem uma especialização rigorosa quanto a estruturas de dados e transformações. Algo diferente se dá com naturezas de fontes diferentes, como por exemplo, base de dados estruturadas.
+
+No caso de bases de dados estruturadas, a genralização poderia ser realizada atraves de controle dos metadados de colunas e tipos. Na camada bronze fazemos a requisição dos dados persistindo a informação da forma com o qual o protocolo de comunicação informa no momento da ingestão. Já na camada silver, quando utilizado como espelho transacional ou tabular, a proposta é normalização da tipagem dos dados frente ao histórico disponível. Neste contexto o controle sobre as colunas das tabelas transacionais permitiria generalizar o processo de transformação.
 
 ### Serviço de Extração ou Ingestão (BRONZE)
 
